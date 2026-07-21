@@ -1,0 +1,6 @@
+/* Atlas App Runtime — embedded iframe container styling */
+.atlas-app-iframe {
+  width: 100%;
+  border: none;
+  display: block;
+}
