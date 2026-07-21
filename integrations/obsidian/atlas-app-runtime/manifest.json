@@ -1,9 +1,9 @@
 {
   "id": "atlas-app-runtime",
   "name": "Atlas App Runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.12.7",
-  "description": "Render vault-local HTML apps in sandboxed iframes with secure origin isolation",
+  "description": "Render vault-local HTML apps in sandboxed iframes with secure origin isolation and capability-scoped file access",
   "author": "AtlasOS Community",
   "authorUrl": "",
   "fundingUrl": "",

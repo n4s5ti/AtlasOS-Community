@@ -6,12 +6,22 @@
  * - entry: .html file path, no traversal or absolute path
  * - height: 240..4000, default 640
  * - connect: array of exact absolute http(s) origins, normalized without trailing slash
+ * - capabilities: optional object with 'files.read' array of exact vault-link paths
+ *
+ * Unknown top-level keys and unknown capability keys are rejected.
  */
 
 export interface AppManifest {
   entry: string;
   height: number;
   connect: string[];
+  filesRead: string[];
+}
+
+export interface ManifestCapabilities {
+  files?: {
+    read?: string[];
+  };
 }
 
 type ParseOk = { ok: true; data: AppManifest };
@@ -22,13 +32,30 @@ const MIN_HEIGHT = 240;
 const MAX_HEIGHT = 4000;
 const DEFAULT_HEIGHT = 640;
 
-// ── CSP-hazardous character validation ──────────────────────────
+// Manifest key allowlists
+// Strict key rejection prevents hidden fields from sneaking in.
+const ALLOWED_TOP_KEYS: Record<string, true> = {
+  version: true, entry: true, height: true, connect: true, capabilities: true,
+};
+const ALLOWED_CAP_KEYS: Record<string, true> = { files: true };
+const ALLOWED_FILES_KEYS: Record<string, true> = { read: true };
+
+// Capability path validation
+// Each path must be an exact vault-link: non-empty, <=256 chars,
+// no path traversal (..), leading slash, no backslash, no control
+// characters, and no .obsidian segment.
+const MAX_PATH_LENGTH = 256;
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+const SEP = '/';
+const OBSIDIAN_DIR = '.obsidian';
+
+// CSP-hazardous character validation
 // Raw characters that could break CSP parsing: whitespace, control
 // chars, quotes, semicolon, comma, star, backslash.
 // The URL parser silently strips some (tab, newline), so the raw
 // input MUST be checked before URL parsing.
 const CSP_HAZARD_RE = /[\x00-\x20\x7f;'"*,\\]/;
-// Percent-encoded CSP-hazardous sequences:  %00-%1F,  %20 (space),
+// Percent-encoded CSP-hazardous sequences: %00-%1F, %20 (space),
 // %22 ("), %27 ('), %2A (*), %2C (,), %3B (;), %5C (\)
 const CSP_PCT_HAZARD_RE = /%(?:0[0-9a-fA-F]|1[0-9a-fA-F]|20|22|27|2[aA]|2[cC]|3[bB]|5[cC])/;
 
@@ -49,17 +76,20 @@ export function parseManifest(source: string): ParseResult {
 
   const obj = parsed as Record<string, unknown>;
 
-  // ── Version ───────────────────────────────────────────────────────────
-  if (
-    !('version' in obj) ||
-    typeof obj.version !== 'number' ||
-    !Number.isInteger(obj.version) ||
-    obj.version !== 1
+  // Unknown top-level key rejection
+  for (const key of Object.keys(obj)) {
+    if (!(key in ALLOWED_TOP_KEYS)) {
+      return { ok: false, error: `Unknown top-level key: ${key}` };
+    }
+  }
+
+  // Version
+  if (    typeof obj.version !== 'number' ||    obj.version !== 1
   ) {
     return { ok: false, error: 'Invalid version: must be 1' };
   }
 
-  // ── Entry ─────────────────────────────────────────────────────────────
+  // Entry
   if (!('entry' in obj) || typeof obj.entry !== 'string' || obj.entry === '') {
     return { ok: false, error: 'Invalid entry: must be a non-empty string ending with .html' };
   }
@@ -70,20 +100,19 @@ export function parseManifest(source: string): ParseResult {
     return { ok: false, error: 'Invalid entry: must end with .html' };
   }
 
-  // Reject path traversal
   if (entry.includes('..')) {
     return { ok: false, error: 'Invalid entry: path traversal not allowed' };
   }
 
-  // Reject absolute paths (starting with /)
   if (entry.startsWith('/')) {
     return { ok: false, error: 'Invalid entry: absolute path not allowed' };
   }
-  // Reject backslashes in entry paths
+
   if (entry.includes('\\')) {
     return { ok: false, error: 'Invalid entry: backslash not allowed' };
   }
-   // ── Height ────────────────────────────────────────────────────────────
+
+  // Height
   let height = DEFAULT_HEIGHT;
 
   if ('height' in obj) {
@@ -103,7 +132,7 @@ export function parseManifest(source: string): ParseResult {
     }
   }
 
-  // ── Connect origins ───────────────────────────────────────────────────
+  // Connect origins
   let connect: string[] = [];
 
   if ('connect' in obj) {
@@ -134,9 +163,88 @@ export function parseManifest(source: string): ParseResult {
     }
   }
 
+  // Capabilities
+  let filesRead: string[] = [];
+
+  if ('capabilities' in obj) {
+    const caps = obj.capabilities;
+
+    if (caps === null || typeof caps !== 'object' || Array.isArray(caps)) {
+      return { ok: false, error: 'Invalid capabilities: must be an object' };
+    }
+
+    const capsObj = caps as Record<string, unknown>;
+
+    for (const key of Object.keys(capsObj)) {
+      if (!(key in ALLOWED_CAP_KEYS)) {
+        return { ok: false, error: `Unknown capabilities key: ${key}` };
+      }
+    }
+
+    if ('files' in capsObj) {
+      const files = capsObj.files;
+
+      if (files === null || typeof files !== 'object' || Array.isArray(files)) {
+        return { ok: false, error: 'Invalid capabilities.files: must be an object' };
+      }
+
+      const filesObj = files as Record<string, unknown>;
+
+      for (const key of Object.keys(filesObj)) {
+        if (!(key in ALLOWED_FILES_KEYS)) {
+          return { ok: false, error: `Invalid capabilities.files key: ${key}` };
+        }
+      }
+
+      if ('read' in filesObj) {
+        const read = filesObj.read;
+
+        if (read === null || !Array.isArray(read)) {
+          return { ok: false, error: 'Invalid capabilities.files.read: must be an array' };
+        }
+
+        const seen = new Set<string>();
+        const paths: string[] = [];
+
+        for (let i = 0; i < read.length; i++) {
+          const p = read[i];
+
+          if (typeof p !== 'string' || p.length === 0 || p.length > MAX_PATH_LENGTH) {
+            return { ok: false, error: `Invalid capabilities.files.read path at index ${i}` };
+          }
+          if (p.includes('..')) {
+            return { ok: false, error: `Invalid capabilities.files.read path at index ${i}` };
+          }
+          if (p.startsWith('/')) {
+            return { ok: false, error: `Invalid capabilities.files.read path at index ${i}` };
+          }
+          if (p.includes('\\')) {
+            return { ok: false, error: `Invalid capabilities.files.read path at index ${i}` };
+          }
+          if (CONTROL_CHAR_RE.test(p)) {
+            return { ok: false, error: `Invalid capabilities.files.read path at index ${i}` };
+          }
+          const segments = p.split(SEP);
+          for (let j = 0; j < segments.length; j++) {
+            if (segments[j] === '' || segments[j] === '.' || segments[j].toLowerCase() === OBSIDIAN_DIR) {
+              return { ok: false, error: `Invalid capabilities.files.read path at index ${i}` };
+            }
+          }
+
+          if (!seen.has(p)) {
+            seen.add(p);
+            paths.push(p);
+          }
+        }
+
+        filesRead = paths;
+      }
+    }
+  }
+
   return {
     ok: true,
-    data: { entry, height, connect },
+    data: { entry, height, connect, filesRead },
   };
 }
 
@@ -148,10 +256,7 @@ export function parseManifest(source: string): ParseResult {
  * Returns null on any validation failure.
  */
 function validateOrigin(origin: string): string | null {
-  // ── Pre-parse CSP-hazard and backslash checks ─────────────────
-  // Check raw input BEFORE URL parsing — the URL constructor
-  // silently strips some characters (tab, newline, etc.), so
-  // they would otherwise pass through undetected.
+  // Pre-parse CSP-hazard and backslash checks
   if (CSP_HAZARD_RE.test(origin)) {
     return null;
   }
@@ -162,8 +267,6 @@ function validateOrigin(origin: string): string | null {
     return null;
   }
 
-  // Strip trailing slash for explicit normalization; the pathname
-  // check below can then use the strict `/` or `''` comparison.
   const cleaned = origin.endsWith('/') ? origin.slice(0, -1) : origin;
 
   let url: URL;
@@ -173,19 +276,14 @@ function validateOrigin(origin: string): string | null {
     return null;
   }
 
-  // Only http and https
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return null;
   }
 
-  // Reject userinfo
   if (url.username !== '' || url.password !== '') {
     return null;
   }
 
-  // Reject path, query, fragment
-  // (pathname is always '/' or '' for bare origins after
-  // trailing-slash stripping)
   if (url.pathname !== '/' && url.pathname !== '') {
     return null;
   }
@@ -196,22 +294,17 @@ function validateOrigin(origin: string): string | null {
     return null;
   }
 
-  // Reject protocol-relative
   if (!origin.includes('://')) {
     return null;
   }
 
-  // Reject empty hostname
   if (!url.hostname) {
     return null;
   }
 
-  // Normalize: reconstruct without trailing slash
   const portPart = url.port ? `:${url.port}` : '';
   const normalized = `${url.protocol}//${url.hostname}${portPart}`;
 
-  // Post-parse safety net: verify normalized origin is CSP-safe
-  // (catches any chars the URL parser decoded or passed through)
   if (CSP_HAZARD_RE.test(normalized)) {
     return null;
   }

@@ -1,6 +1,6 @@
 {
   "name": "atlas-app-runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Render vault-local single-file HTML apps in Obsidian via secure sandboxed iframes",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,10 @@
     "build": "node esbuild.config.mjs production",
     "test": "vitest run"
   },
-  "keywords": ["obsidian", "plugin"],
+  "keywords": [
+    "obsidian",
+    "plugin"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.0.0",

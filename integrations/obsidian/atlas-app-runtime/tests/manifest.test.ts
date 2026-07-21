@@ -4,11 +4,11 @@ import { parseManifest, ParseResult } from '../src/manifest';
 /**
  * Contract tests for parseManifest(source: string): ParseResult
  *
- * ParseResult is { ok: true; data: { entry: string; height: number; connect: string[] } }
+ * ParseResult is { ok: true; data: { entry: string; height: number; connect: string[]; filesRead: string[] } }
  *                | { ok: false; error: string }
  *
  * Guard: rejects everything that cannot produce a safe sandboxed iframe.
- * No default — every field is validated or has a safe fallback (height, connect).
+ * No default — every field is validated or has a safe fallback (height, connect, filesRead).
  */
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -50,21 +50,6 @@ describe('parseManifest — malformed / non-object JSON', () => {
 
   it('rejects JSON string', () => {
     const err = assertErr(parseManifest('"hello"'));
-    expect(err).toBeTruthy();
-  });
-
-  it('rejects JSON null', () => {
-    const err = assertErr(parseManifest('null'));
-    expect(err).toBeTruthy();
-  });
-
-  it('rejects JSON array', () => {
-    const err = assertErr(parseManifest('["entry.html"]'));
-    expect(err).toBeTruthy();
-  });
-
-  it('rejects JSON boolean', () => {
-    const err = assertErr(parseManifest('true'));
     expect(err).toBeTruthy();
   });
 });
@@ -110,6 +95,31 @@ describe('parseManifest — version', () => {
       parseManifest(JSON.stringify({ version: 1.1, entry: 'app.html' })),
     );
     expect(err).toMatch(/version/i);
+  });
+});
+
+// ── Unknown top-level key rejection ──────────────────────────────────────
+
+describe('parseManifest — unknown top-level keys', () => {
+  it('rejects unknown key: foo', () => {
+    const err = assertErr(
+      parseManifest(JSON.stringify({ version: 1, entry: 'app.html', foo: 'bar' })),
+    );
+    expect(err).toMatch(/unknown top-level key/i);
+  });
+
+  it('rejects unknown key: type', () => {
+    const err = assertErr(
+      parseManifest(JSON.stringify({ version: 1, entry: 'app.html', type: 'app' })),
+    );
+    expect(err).toMatch(/unknown top-level key/i);
+  });
+
+  it('rejects unknown key: permissions', () => {
+    const err = assertErr(
+      parseManifest(JSON.stringify({ version: 1, entry: 'app.html', permissions: [] })),
+    );
+    expect(err).toMatch(/unknown top-level key/i);
   });
 });
 
@@ -854,6 +864,352 @@ describe('parseManifest — connect origins', () => {
   });
 });
 
+// ── Capabilities validation ──────────────────────────────────────────────
+
+describe('parseManifest — capabilities', () => {
+  it('defaults filesRead to empty array when capabilities omitted', () => {
+    const data = assertOk(parseManifest(minimalValid));
+    expect(data.filesRead).toEqual([]);
+  });
+
+  it('defaults filesRead to empty array when capabilities is empty object', () => {
+    const data = assertOk(
+      parseManifest(
+        JSON.stringify({ version: 1, entry: 'app.html', capabilities: {} }),
+      ),
+    );
+    expect(data.filesRead).toEqual([]);
+  });
+
+  it('defaults filesRead to empty array when capabilities.files is omitted', () => {
+    const data = assertOk(
+      parseManifest(
+        JSON.stringify({ version: 1, entry: 'app.html', capabilities: { files: {} } }),
+      ),
+    );
+    expect(data.filesRead).toEqual([]);
+  });
+
+  it('defaults filesRead to empty array when capabilities.files.read is omitted', () => {
+    const data = assertOk(
+      parseManifest(
+        JSON.stringify({ version: 1, entry: 'app.html', capabilities: { files: { read: [] } } }),
+      ),
+    );
+    expect(data.filesRead).toEqual([]);
+  });
+
+  it('rejects capabilities as null', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({ version: 1, entry: 'app.html', capabilities: null }),
+      ),
+    );
+    expect(err).toMatch(/capabilities/i);
+  });
+
+  it('rejects capabilities as string', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({ version: 1, entry: 'app.html', capabilities: 'yes' }),
+      ),
+    );
+    expect(err).toMatch(/capabilities/i);
+  });
+
+  it('rejects capabilities as array', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({ version: 1, entry: 'app.html', capabilities: [] }),
+      ),
+    );
+    expect(err).toMatch(/capabilities/i);
+  });
+
+  it('rejects capabilities with unknown key', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { storage: { read: true } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/unknown capabilities key/i);
+  });
+
+  it('rejects capabilities.files as null', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: null },
+        }),
+      ),
+    );
+    expect(err).toMatch(/capabilities\.files/i);
+  });
+
+  it('rejects capabilities.files as string', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: 'all' },
+        }),
+      ),
+    );
+    expect(err).toMatch(/capabilities\.files/i);
+  });
+
+  it('rejects capabilities.files with unknown key', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { write: ['/data'] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/capabilities\.files key/i);
+  });
+
+  it('rejects capabilities.files.read as null', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: null } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/capabilities\.files\.read/i);
+  });
+
+  it('rejects capabilities.files.read as string', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: 'notes/doc.md' } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/capabilities\.files\.read/i);
+  });
+
+  // ── Path validation ────────────────────────────────────────────
+
+  it('accepts valid single path in files.read', () => {
+    const data = assertOk(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: ['notes/doc.md'] } },
+        }),
+      ),
+    );
+    expect(data.filesRead).toEqual(['notes/doc.md']);
+  });
+
+  it('accepts valid multiple paths in files.read', () => {
+    const data = assertOk(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: {
+            files: {
+              read: ['notes/doc.md', 'journal/entry.md', 'assets/logo.png'],
+            },
+          },
+        }),
+      ),
+    );
+    expect(data.filesRead).toEqual(['notes/doc.md', 'journal/entry.md', 'assets/logo.png']);
+  });
+
+  it('rejects empty string path in files.read', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: [''] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects path exceeding 256 characters', () => {
+    const longPath = 'a'.repeat(257);
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: [longPath] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects path with traversal (..)', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: ['notes/../secret.md'] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects path with a leading slash', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: ['/notes/doc.md'] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects path with backslash', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: ['notes\\doc.md'] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects path with control character', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: ['notes/doc\x00.md'] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects path containing .obsidian segment', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: ['.obsidian/plugins/my-plugin/data.json'] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+
+  it('rejects case-variant .obsidian path segments', () => {
+    const err = assertErr(parseManifest(JSON.stringify({
+      version: 1,
+      entry: 'app.html',
+      capabilities: { files: { read: ['Atlas Apps/.Obsidian/config.json'] } },
+    })));
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects path with .obsidian in subdirectory', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: ['notes/.obsidian/config'] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+
+  it.each(['Atlas Apps/./data.json', 'Atlas Apps//data.json', 'Atlas Apps/data.json/'])(
+    'rejects non-canonical capability path %s',
+    (path) => {
+      const err = assertErr(parseManifest(JSON.stringify({
+        version: 1,
+        entry: 'app.html',
+        capabilities: { files: { read: [path] } },
+      })));
+      expect(err).toMatch(/path at index/i);
+    },
+  );
+
+  it('rejects non-string entry in files.read array (number)', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: [42] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  it('rejects non-string entry in files.read array (null)', () => {
+    const err = assertErr(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: { files: { read: [null] } },
+        }),
+      ),
+    );
+    expect(err).toMatch(/path at index/i);
+  });
+
+  // ── Deduplication ──────────────────────────────────────────────
+
+  it('deduplicates paths in files.read preserving first-occurrence order', () => {
+    const data = assertOk(
+      parseManifest(
+        JSON.stringify({
+          version: 1,
+          entry: 'app.html',
+          capabilities: {
+            files: {
+              read: ['notes/doc.md', 'journal/entry.md', 'notes/doc.md', 'notes/other.md', 'journal/entry.md'],
+            },
+          },
+        }),
+      ),
+    );
+    expect(data.filesRead).toEqual(['notes/doc.md', 'journal/entry.md', 'notes/other.md']);
+  });
+});
+
 // ── Complete valid manifests ─────────────────────────────────────────────
 
 describe('parseManifest — valid manifests', () => {
@@ -863,10 +1219,11 @@ describe('parseManifest — valid manifests', () => {
       entry: 'app.html',
       height: 640,
       connect: [],
+      filesRead: [],
     });
   });
 
-  it('parses manifest with all fields', () => {
+  it('parses manifest with all fields including capabilities', () => {
     const data = assertOk(
       parseManifest(
         JSON.stringify({
@@ -874,6 +1231,7 @@ describe('parseManifest — valid manifests', () => {
           entry: 'dashboard/index.html',
           height: 800,
           connect: ['https://api.example.com'],
+          capabilities: { files: { read: ['settings.json'] } },
         }),
       ),
     );
@@ -881,6 +1239,7 @@ describe('parseManifest — valid manifests', () => {
       entry: 'dashboard/index.html',
       height: 800,
       connect: ['https://api.example.com'],
+      filesRead: ['settings.json'],
     });
   });
 

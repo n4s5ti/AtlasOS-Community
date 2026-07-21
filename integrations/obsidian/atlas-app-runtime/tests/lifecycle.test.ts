@@ -2,26 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { AtlasAppChild } from '../src/main';
 import { TFile } from 'obsidian';
 
-class FakeResizeObserver {
-  static latest: FakeResizeObserver;
-  private readonly callback: ResizeObserverCallback;
-  readonly disconnect = vi.fn();
-
-  constructor(callback: ResizeObserverCallback) {
-    this.callback = callback;
-    FakeResizeObserver.latest = this;
-  }
-
-  observe(): void {}
-
-  async trigger(): Promise<void> {
-    this.callback([], this as unknown as ResizeObserver);
-    await Promise.resolve();
-    await Promise.resolve();
-  }
-}
-
-vi.stubGlobal('ResizeObserver', FakeResizeObserver);
 
 class FakeIntersectionObserver {
   static latest: FakeIntersectionObserver;
@@ -160,7 +140,6 @@ describe('AtlasAppChild lifecycle', () => {
 
     expect(container.createEl).not.toHaveBeenCalled();
     expect(readFile).not.toHaveBeenCalled();
-    expect(FakeResizeObserver.latest.disconnect).toHaveBeenCalledOnce();
     expect(FakeIntersectionObserver.latest.disconnect).toHaveBeenCalledOnce();
   });
 });

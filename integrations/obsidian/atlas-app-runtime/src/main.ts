@@ -6,10 +6,13 @@
  * MessageChannel, and bounded resize.
  */
 
-import { Plugin, MarkdownRenderChild, TFile } from 'obsidian';
+import { Plugin, MarkdownRenderChild, TFile, normalizePath } from 'obsidian';
 import { parseManifest, AppManifest } from './manifest';
 import { buildCsp } from './csp';
 import { buildSandboxDocument } from './document';
+import { handleFileBridgeRequest } from './file-bridge';
+import { activateAtlasAppNote } from './app-note-activation';
+import { readExactFile } from './exact-file-reader';
 
 /** Sentinel key used to secure MessagePort transfer. */
 const CHANNEL_ID_SENTINEL = '__atlas_channel_id__';
@@ -48,9 +51,23 @@ export default class AtlasAppRuntimePlugin extends Plugin {
           manifest,
           file,
           (f: TFile) => this.app.vault.cachedRead(f),
+          (path: string) => readExactFile(path, {
+            normalize: normalizePath,
+            get: (exactPath: string) => {
+              const target = this.app.vault.getAbstractFileByPath(exactPath);
+              return target instanceof TFile ? target : null;
+            },
+            read: (target: TFile) => this.app.vault.cachedRead(target),
+          }),
         );
         ctx.addChild(child);
       },
+    );
+
+    this.registerEvent(
+      this.app.workspace.on('file-open', (file) => {
+        if (file) void activateAtlasAppNote(this.app, file);
+      }),
     );
   }
 }
@@ -85,6 +102,7 @@ const MAX_HEIGHT = 4000;
 
 /** Function signature for vault file reading. */
 export type FileReader = (file: TFile) => Promise<string>;
+export type AuthorizedFileReader = (path: string) => Promise<string>;
 
 /**
  * Owns one renderer instance. A host ResizeObserver mounts only while this
@@ -95,11 +113,11 @@ export class AtlasAppChild extends MarkdownRenderChild {
   private readonly manifest: AppManifest;
   private readonly entryFile: TFile;
   private readonly readFile: FileReader;
+  private readonly readAuthorizedFile: AuthorizedFileReader;
   private channel: MessageChannel | null = null;
   private iframe: HTMLIFrameElement | null = null;
   private channelId: string | null = null;
   private loadHandler: (() => void) | null = null;
-  private resizeObserver: ResizeObserver | null = null;
   private intersectionObserver: IntersectionObserver | null = null;
   private mountGeneration = 0;
   private mounting = false;
@@ -110,20 +128,23 @@ export class AtlasAppChild extends MarkdownRenderChild {
     manifest: AppManifest,
     entryFile: TFile,
     readFile: FileReader,
+    readAuthorizedFile: AuthorizedFileReader = async () => {
+      throw new Error('File capability unavailable');
+    },
   ) {
     super(containerEl);
     this.manifest = manifest;
     this.entryFile = entryFile;
     this.readFile = readFile;
+    this.readAuthorizedFile = readAuthorizedFile;
   }
 
   override async onload(): Promise<void> {
+    if (this.disposed) return;
     const sync = (): void => {
       void this.syncVisibility();
     };
-    this.resizeObserver = new ResizeObserver(sync);
     this.intersectionObserver = new IntersectionObserver(sync);
-    this.resizeObserver.observe(this.containerEl);
     this.intersectionObserver.observe(this.containerEl);
     this.register(() => this.cleanup());
     await this.syncVisibility();
@@ -178,13 +199,14 @@ export class AtlasAppChild extends MarkdownRenderChild {
     this.iframe = iframe;
     iframe.className = 'atlas-app-iframe';
     iframe.setAttr('sandbox', 'allow-scripts');
-    iframe.setAttr('loading', 'lazy');
     iframe.setAttr('referrerpolicy', 'no-referrer');
     iframe.style.height = `${this.manifest.height}px`;
 
     const channel = new MessageChannel();
     this.channel = channel;
-    channel.port1.onmessage = (event: MessageEvent) => this.handlePortMessage(event);
+    channel.port1.onmessage = (event: MessageEvent) => {
+      void this.handlePortMessage(event);
+    };
     channel.port1.start();
 
     this.loadHandler = () => {
@@ -193,6 +215,7 @@ export class AtlasAppChild extends MarkdownRenderChild {
       this.loadHandler = null;
       iframe.contentWindow?.postMessage(
         { [CHANNEL_ID_SENTINEL]: channelId },
+        // srcdoc has an opaque origin; capability security is the transferred port.
         '*',
         [channel.port2],
       );
@@ -219,9 +242,7 @@ export class AtlasAppChild extends MarkdownRenderChild {
   private cleanup(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.resizeObserver?.disconnect();
     this.intersectionObserver?.disconnect();
-    this.resizeObserver = null;
     this.intersectionObserver = null;
     this.unmountFrame();
   }
@@ -238,14 +259,32 @@ export class AtlasAppChild extends MarkdownRenderChild {
     }
   }
 
-  private handlePortMessage(event: MessageEvent): void {
+  private async handlePortMessage(event: MessageEvent): Promise<void> {
     const data = event.data;
     if (!data || typeof data !== 'object' || data.channelId !== this.channelId) return;
-    if (data.type !== 'resize') return;
-    const height = data.height;
-    if (typeof height !== 'number' || !Number.isInteger(height)) return;
-    const clamped = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, height));
-    if (this.iframe) this.iframe.style.height = `${clamped}px`;
+    if (data.type === 'resize') {
+      const height = data.height;
+      if (typeof height !== 'number' || !Number.isInteger(height)) return;
+      const clamped = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, height));
+      if (this.iframe) this.iframe.style.height = `${clamped}px`;
+      return;
+    }
+
+    const channel = this.channel;
+    const channelId = this.channelId;
+    if (!channel || !channelId) return;
+    const response = await handleFileBridgeRequest(data, {
+      channelId,
+      allowedPaths: this.manifest.filesRead,
+      read: this.readAuthorizedFile,
+    });
+    if (response && !this.disposed && channel === this.channel && channelId === this.channelId) {
+      try {
+        channel.port1.postMessage(response);
+      } catch {
+        // The renderer may hide and close its port while an authorized read is pending.
+      }
+    }
   }
 }
 

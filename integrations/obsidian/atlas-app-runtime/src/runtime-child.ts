@@ -3,6 +3,8 @@
  *
  * The child connects to the parent via a transferred MessagePort and
  * sends typed messages (ready, resize) using the agreed channel protocol.
+ * After the port is established, exposes window.atlasHost.request for
+ * capability-scoped RPC calls (e.g. files.read).
  */
 
 /**
@@ -12,19 +14,39 @@
  * 1. Listens for the MessagePort sent by the parent via postMessage.
  * 2. Validates the channelId to prevent cross-frame spoofing.
  * 3. Sends a 'ready' message to the parent once connected.
- * 4. Monitors document body growth and sends 'resize' messages.
- * 5. Handles incoming messages from the parent — responds to 'dispose'
- *    by disconnecting the ResizeObserver, clearing timers, and closing the port.
+ * 4. Exposes a frozen window.atlasHost.request(method, params) that
+ *    returns a Promise and times out after 10 seconds.
+ * 5. Monitors document body growth and sends 'resize' messages.
+ * 6. Handles incoming messages from the parent — responds to 'dispose'
+ *    by rejecting pending requests, disconnecting the ResizeObserver,
+ *    clearing timers, and closing the port.
  */
 export function buildChildScript(channelId: string): string {
-  // Escape for JS string literal context
   const safeId = escapeJsString(channelId);
   const channelIdSentinel = '__atlas_channel_id__';
+
+  const REQ_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+  const REQ_ID_LEN = 16;
+  const REQ_TIMEOUT_MS = 10000;
 
   return `
 (function() {
   var CHANNEL_ID = '${safeId}';
   var port = null;
+  var pendingRequests = Object.create(null);
+  var REQ_CHARS = '${REQ_CHARS}';
+  var REQ_ID_LEN = ${REQ_ID_LEN};
+  var REQ_TIMEOUT_MS = ${REQ_TIMEOUT_MS};
+
+  function generateRequestId() {
+    var id = '';
+    var array = new Uint8Array(REQ_ID_LEN);
+    crypto.getRandomValues(array);
+    for (var i = 0; i < REQ_ID_LEN; i++) {
+      id += REQ_CHARS[array[i] % 64];
+    }
+    return id;
+  }
 
   function handleMessage(event) {
     // We only accept the first port transfer from the parent
@@ -36,20 +58,72 @@ export function buildChildScript(channelId: string): string {
     port.onmessage = handlePortMessage;
     port.start();
 
+    // Expose frozen request API once port is connected
+    window.atlasHost = Object.freeze({
+      request: function(method, params) {
+        return new Promise(function(resolve, reject) {
+          var id;
+          do { id = generateRequestId(); } while (pendingRequests[id]);
+          var timer = setTimeout(function() {
+            delete pendingRequests[id];
+            reject(new Error('Request timed out'));
+          }, REQ_TIMEOUT_MS);
+          pendingRequests[id] = { resolve: resolve, reject: reject, timer: timer };
+          try {
+            port.postMessage({ type: 'request', channelId: CHANNEL_ID, id: id, method: method, params: params });
+          } catch (e) {
+            clearTimeout(timer);
+            delete pendingRequests[id];
+            reject(new Error('Failed to send request'));
+          }
+        });
+      }
+    });
+    window.dispatchEvent(new CustomEvent('atlas-host-ready'));
+
     // Signal readiness to the parent
     port.postMessage({ type: 'ready', channelId: CHANNEL_ID });
 
     // Stop listening for window messages once connected
     window.removeEventListener('message', handleMessage);
   }
+
   function handlePortMessage(event) {
     var data = event.data;
     if (!data || typeof data !== 'object') return;
     if (data.channelId !== CHANNEL_ID) return;
-    if (data.type === 'dispose') handleDispose();
+
+    if (data.type === 'dispose') {
+      handleDispose();
+      return;
+    }
+
+    if (data.type === 'response') {
+      var pending = pendingRequests[data.id];
+      if (pending) {
+        clearTimeout(pending.timer);
+        delete pendingRequests[data.id];
+        if (data.ok) {
+          pending.resolve(data.result);
+        } else {
+          pending.reject(new Error(data.error ? data.error.message : 'Request failed'));
+        }
+      }
+      return;
+    }
   }
 
   function handleDispose() {
+    // Reject all pending requests before cleanup
+    for (var id in pendingRequests) {
+      if (Object.prototype.hasOwnProperty.call(pendingRequests, id)) {
+        clearTimeout(pendingRequests[id].timer);
+        pendingRequests[id].reject(new Error('Disposed'));
+      }
+    }
+    pendingRequests = Object.create(null);
+    try { delete window.atlasHost; } catch(e) { window.atlasHost = undefined; }
+
     if (resizeObserver) {
       resizeObserver.disconnect();
       resizeObserver = null;
